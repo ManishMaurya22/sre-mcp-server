@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sre-k8s": {
+      "command": "/Users/<YOUR_USERNAME>/sre-mcp-server/venv/bin/python",
+      "args": ["/Users/<YOUR_USERNAME>/sre-mcp-server/server.py"]
+    }
+  }
+}
