@@ -1,4 +1,4 @@
-# 🤖 SRE MCP Server — Enterprise Kubernetes via AI
+# 🤖 Kubernetes + Prometheus SRE MCP Server — natural language cluster ops, SLO monitoring, and PromQL queries via Claude
 
 > **Natural language Kubernetes operations** — powered by Model Context Protocol (MCP)  
 > Built to scale from a single cluster to multi-cluster, multi-team enterprise environments.
