@@ -272,9 +272,12 @@ async def call_tool(name: str, arguments: dict):
                 container_states = []
                 for cs in (pod.status.container_statuses or []):
                     state = "unknown"
-                    if cs.state.running:        state = "running"
-                    elif cs.state.waiting:      state = f"waiting:{cs.state.waiting.reason}"
-                    elif cs.state.terminated:   state = f"terminated:{cs.state.terminated.reason}"
+                    if cs.state.running:
+                        state = "running"
+                    elif cs.state.waiting:
+                        state = f"waiting:{cs.state.waiting.reason}"
+                    elif cs.state.terminated:
+                        state = f"terminated:{cs.state.terminated.reason}"
                     container_states.append({"container": cs.name, "state": state})
                 result.append({
                     "name": pod.metadata.name, "phase": pod.status.phase,
