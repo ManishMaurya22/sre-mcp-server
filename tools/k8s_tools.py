@@ -43,4 +43,19 @@ TOOLS = [
         "description": "List all namespaces in the cluster",
         "example_prompt": "What namespaces exist in this cluster?"
     },
+    {
+        "name": "query_prometheus",
+        "description": "Run any PromQL query against Prometheus",
+        "example_prompt": "What is the current request rate for the production namespace?"
+    },
+    {
+        "name": "get_slo_status",
+        "description": "Get SLO availability + latency burn rate status for a namespace",
+        "example_prompt": "What is the SLO status for the production namespace?"
+    },
+    {
+        "name": "get_top_consumers",
+        "description": "Top pods by CPU or memory usage",
+        "example_prompt": "Show me the top 5 CPU consumers in production"
+    },
 ]

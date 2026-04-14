@@ -20,6 +20,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 from kubernetes.client.rest import ApiException
+from prometheus import query_prometheus_api, PROMETHEUS_URL
 
 from cluster_manager import cluster_manager
 from policy import check_policy, WRITE_OPERATIONS
@@ -168,6 +169,72 @@ async def list_tools():
                 "properties": {
                     "limit": {"type": "integer", "description": "Number of entries (default 20)"}
                 }
+            }
+        ),
+        Tool(
+            name="query_prometheus",
+            description=(
+                "Run a PromQL query against Prometheus. "
+                "Use for SLO burn rates, error rates, CPU/memory usage, "
+                "custom metrics. Requires Prometheus port-forward or in-cluster URL."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "PromQL expression e.g. rate(http_requests_total[5m])"
+                    },
+                    "duration": {
+                        "type": "string",
+                        "description": "Range for range queries e.g. 1h, 30m (optional)"
+                    },
+                    "step": {
+                        "type": "string",
+                        "description": "Step interval for range queries e.g. 1m, 5m (optional)"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="get_slo_status",
+            description=(
+                "Get current SLO status — availability and latency burn rates. "
+                "Shows error budget remaining and whether SLO is at risk."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace to check SLOs for"
+                    },
+                    "job": {
+                        "type": "string",
+                        "description": "Prometheus job label for the service (optional)"
+                    }
+                },
+                "required": ["namespace"]
+            }
+        ),
+        Tool(
+            name="get_top_consumers",
+            description="Show top pods by CPU or memory usage in a namespace",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string"},
+                    "metric":    {
+                        "type": "string",
+                        "description": "cpu or memory (default: cpu)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of top pods to return (default: 10)"
+                    }
+                },
+                "required": ["namespace"]
             }
         ),
     ]
@@ -337,7 +404,84 @@ async def call_tool(name: str, arguments: dict):
             if not entries:
                 return [TextContent(type="text", text="No audit entries yet")]
             return [TextContent(type="text", text=json.dumps(entries, indent=2))]
+        elif name == "query_prometheus":
+            result = query_prometheus_api(
+                query=arguments["query"],
+                duration=arguments.get("duration"),
+                step=arguments.get("step")
+            )
+            audit_log(name, arguments, cluster, "allowed")
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
+        elif name == "get_slo_status":
+            ns  = arguments["namespace"]
+            job = arguments.get("job", "")
+            job_filter = f',job="{job}"' if job else ""
+
+            queries = {
+                "availability_5m": f'sum(rate(http_server_requests_seconds_count{{namespace="{ns}"{job_filter},status!~"5.."}}[5m])) / sum(rate(http_server_requests_seconds_count{{namespace="{ns}"{job_filter}}}[5m])) * 100',
+                "error_rate_5m":   f'sum(rate(http_server_requests_seconds_count{{namespace="{ns}"{job_filter},status=~"5.."}}[5m])) / sum(rate(http_server_requests_seconds_count{{namespace="{ns}"{job_filter}}}[5m])) * 100',
+                "latency_p99_ms":  f'histogram_quantile(0.99, sum by(le) (rate(http_server_requests_seconds_bucket{{namespace="{ns}"{job_filter}}}[5m]))) * 1000',
+                "latency_p95_ms":  f'histogram_quantile(0.95, sum by(le) (rate(http_server_requests_seconds_bucket{{namespace="{ns}"{job_filter}}}[5m]))) * 1000',
+                "request_rate":    f'sum(rate(http_server_requests_seconds_count{{namespace="{ns}"{job_filter}}}[5m]))',
+            }
+
+            results = {}
+            for metric_name, q in queries.items():
+                r = query_prometheus_api(q)
+                if r.get("status") == "success" and r.get("data", {}).get("result"):
+                    val = r["data"]["result"][0].get("value", [None, "N/A"])[1]
+                    results[metric_name] = round(float(val), 4) if val != "N/A" else "N/A"
+                else:
+                    results[metric_name] = "no data"
+
+            # Evaluate SLO health
+            avail = results.get("availability_5m")
+            slo_status = "unknown"
+            if isinstance(avail, float):
+                if avail >= 99.9:
+                    slo_status = "✅ healthy (>= 99.9%)"
+                elif avail >= 99.0:
+                    slo_status = "⚠️  warning (99.0–99.9%)"
+                else:
+                    slo_status = "🔴 breaching (< 99.0%)"
+
+            output = {
+                "namespace":       ns,
+                "slo_target":      "99.9% availability",
+                "slo_status":      slo_status,
+                "metrics_5m":      results,
+                "prometheus_url":  PROMETHEUS_URL,
+            }
+            audit_log(name, arguments, cluster, "allowed")
+            return [TextContent(type="text", text=json.dumps(output, indent=2))]
+
+        elif name == "get_top_consumers":
+            ns     = arguments["namespace"]
+            metric = arguments.get("metric", "cpu")
+            limit  = arguments.get("limit", 10)
+
+            if metric == "cpu":
+                q = f'sort_desc(sum by(pod) (rate(container_cpu_usage_seconds_total{{namespace="{ns}",container!="",container!="POD"}}[5m])))'
+                unit = "cores"
+            else:
+                q = f'sort_desc(sum by(pod) (container_memory_working_set_bytes{{namespace="{ns}",container!="",container!="POD"}}))'
+                unit = "bytes"
+
+            result = query_prometheus_api(q)
+            pods   = []
+
+            if result.get("status") == "success":
+                for item in result["data"]["result"][:limit]:
+                    val = float(item["value"][1])
+                    pods.append({
+                        "pod":   item["metric"].get("pod", "unknown"),
+                        "value": round(val, 6) if metric == "cpu" else int(val),
+                        "unit":  unit
+                    })
+
+            audit_log(name, arguments, cluster, "allowed")
+            return [TextContent(type="text", text=json.dumps({"namespace": ns, "metric": metric, "top_pods": pods}, indent=2))]
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
